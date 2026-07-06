@@ -8,10 +8,13 @@ services:
       - "8080:8080"
     volumes:
       - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    # mode=1777 because the image runs as a non-root user - a default
+    # root-owned tmpfs mount would deny it permission to create the
+    # client_temp/proxy_temp/etc subdirectories it needs at startup
     tmpfs:
-      - /tmp
-      - /var/cache/nginx
-      - /var/run
+      - /tmp:mode=1777
+      - /var/cache/nginx:mode=1777
+      - /var/run:mode=1777
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -38,7 +41,7 @@ services:
     secrets:
       - mysql_password
     tmpfs:
-      - /tmp
+      - /tmp:mode=1777
     read_only: true
     security_opt:
       - no-new-privileges:true
