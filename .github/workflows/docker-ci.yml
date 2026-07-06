@@ -98,19 +98,29 @@ jobs:
             mysql:8.4
           # on a fresh/empty data dir the official image boots a temporary,
           # socket-only bootstrap server first, then restarts as the real
-          # server - a single successful ping or query can land in that
-          # bootstrap window, so wait for "ready for connections" to appear
-          # twice in the logs (bootstrap + real server) before trusting it
-          for i in $(seq 1 30); do
-            COUNT=$(docker logs demo-mysql 2>&1 | grep -c "ready for connections" || true)
-            [ "${COUNT:-0}" -ge 2 ] && break
-            sleep 2
+          # one - a single successful query can land in that bootstrap
+          # window and then fail moments later, so require 3 consecutive
+          # successes before trusting it's actually the final server
+          READY=0
+          for i in $(seq 1 60); do
+            if docker exec demo-mysql mysql -uroot -prootpass -e "SELECT 1" >/dev/null 2>&1; then
+              READY=$((READY + 1))
+              [ "$READY" -ge 3 ] && break
+            else
+              READY=0
+            fi
+            sleep 1
           done
 
       - name: Insert test data
         run: |
-          docker exec demo-mysql mysql -uroot -prootpass -e \
-            "CREATE TABLE IF NOT EXISTS taskdb.probe (id INT); INSERT INTO taskdb.probe VALUES (42);"
+          # belt-and-suspenders: retry the actual operation too, in case it
+          # still lands in a restart blip the readiness check missed
+          for i in $(seq 1 15); do
+            docker exec demo-mysql mysql -uroot -prootpass -e \
+              "CREATE TABLE IF NOT EXISTS taskdb.probe (id INT); INSERT INTO taskdb.probe VALUES (42);" && break
+            sleep 2
+          done
 
       - name: Inspect and manage the custom network
         run: |
@@ -146,11 +156,20 @@ jobs:
           docker run -d --name demo-mysql-restored --network demo-net \
             -v demo-data:/var/lib/mysql \
             -e MYSQL_ROOT_PASSWORD=rootpass mysql:8.4
-          for i in $(seq 1 30); do
-            docker exec demo-mysql-restored mysql -uroot -prootpass -e "SELECT 1" >/dev/null 2>&1 && break
+          READY=0
+          for i in $(seq 1 60); do
+            if docker exec demo-mysql-restored mysql -uroot -prootpass -e "SELECT 1" >/dev/null 2>&1; then
+              READY=$((READY + 1))
+              [ "$READY" -ge 3 ] && break
+            else
+              READY=0
+            fi
+            sleep 1
+          done
+          for i in $(seq 1 15); do
+            RESULT=$(docker exec demo-mysql-restored mysql -uroot -prootpass -N -e "SELECT id FROM taskdb.probe;" 2>/dev/null) && break
             sleep 2
           done
-          RESULT=$(docker exec demo-mysql-restored mysql -uroot -prootpass -N -e "SELECT id FROM taskdb.probe;")
           echo "Restored row: $RESULT"
           [ "$RESULT" = "42" ]
 
@@ -294,11 +313,16 @@ jobs:
             -e MYSQL_ROOT_PASSWORD=rootpass -e MYSQL_DATABASE=taskdb \
             -e MYSQL_USER=taskuser -e MYSQL_PASSWORD=taskpass mysql:8.4
           # fresh volume => same bootstrap-then-restart startup as the
-          # network-and-volume-demo job, so use the same "twice" signal
-          for i in $(seq 1 30); do
-            COUNT=$(docker logs pull-mysql 2>&1 | grep -c "ready for connections" || true)
-            [ "${COUNT:-0}" -ge 2 ] && break
-            sleep 2
+          # network-and-volume-demo job; require consecutive successes
+          READY=0
+          for i in $(seq 1 60); do
+            if docker exec pull-mysql mysql -uroot -prootpass -e "SELECT 1" >/dev/null 2>&1; then
+              READY=$((READY + 1))
+              [ "$READY" -ge 3 ] && break
+            else
+              READY=0
+            fi
+            sleep 1
           done
           docker run -d --name pull-app --network pull-net -p 8080:8080 \
             -e DB_HOST=pull-mysql -e DB_NAME=taskdb -e DB_USER=taskuser -e DB_PASSWORD=taskpass \
