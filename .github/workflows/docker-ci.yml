@@ -127,7 +127,7 @@ jobs:
           docker network ls
           docker network inspect demo-net
           docker network connect bridge demo-mysql
-          docker network inspect demo-mysql --format '{{json .NetworkSettings.Networks}}'
+          docker inspect demo-mysql --format '{{json .NetworkSettings.Networks}}'
           docker network disconnect bridge demo-mysql
 
       - name: Inspect volumes
