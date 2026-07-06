@@ -1,0 +1,307 @@
+name: Docker CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: docker-assignment2-app
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Run unit tests
+        working-directory: ./app
+        run: mvn -B test
+
+  dockerfile-optimization:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build baseline (naive) image and time it
+        working-directory: ./app
+        run: |
+          START=$(date +%s)
+          docker build -f Dockerfile.before -t ${{ env.IMAGE_NAME }}:before .
+          END=$(date +%s)
+          echo "BEFORE_SECONDS=$((END-START))" >> "$GITHUB_ENV"
+
+      - name: Build optimized image and time it
+        working-directory: ./app
+        run: |
+          START=$(date +%s)
+          docker build -f Dockerfile -t ${{ env.IMAGE_NAME }}:after .
+          END=$(date +%s)
+          echo "AFTER_SECONDS=$((END-START))" >> "$GITHUB_ENV"
+
+      - name: Rebuild optimized image again (proves layer caching)
+        working-directory: ./app
+        run: |
+          START=$(date +%s)
+          docker build -f Dockerfile -t ${{ env.IMAGE_NAME }}:after-cached .
+          END=$(date +%s)
+          echo "AFTER_CACHED_SECONDS=$((END-START))" >> "$GITHUB_ENV"
+
+      - name: Compare image sizes and build times
+        run: |
+          BEFORE_SIZE=$(docker image inspect ${{ env.IMAGE_NAME }}:before --format='{{.Size}}')
+          AFTER_SIZE=$(docker image inspect ${{ env.IMAGE_NAME }}:after --format='{{.Size}}')
+          {
+            echo "## Dockerfile optimization results"
+            echo ""
+            echo "| Metric | Before (Dockerfile.before) | After (Dockerfile) |"
+            echo "|---|---|---|"
+            echo "| Image size | $(numfmt --to=iec "$BEFORE_SIZE") | $(numfmt --to=iec "$AFTER_SIZE") |"
+            echo "| Build time (cold) | ${BEFORE_SECONDS}s | ${AFTER_SECONDS}s |"
+            echo "| Build time (warm/cached) | n/a | ${AFTER_CACHED_SECONDS}s |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          docker images ${{ env.IMAGE_NAME }}
+
+  network-and-volume-demo:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create custom network
+        run: docker network create demo-net
+
+      - name: Create named volume for MySQL data
+        run: docker volume create demo-data
+
+      - name: Prepare a bind-mounted config file
+        run: |
+          mkdir -p ci-tmp
+          echo "[mysqld]" > ci-tmp/custom.cnf
+          echo "max_connections=150" >> ci-tmp/custom.cnf
+
+      - name: Run MySQL with a named volume AND a bind mount together
+        run: |
+          docker run -d --name demo-mysql --network demo-net \
+            -v demo-data:/var/lib/mysql \
+            -v "$(pwd)/ci-tmp/custom.cnf:/etc/mysql/conf.d/custom.cnf:ro" \
+            -e MYSQL_ROOT_PASSWORD=rootpass -e MYSQL_DATABASE=taskdb \
+            mysql:8.4
+          for i in $(seq 1 30); do
+            docker exec demo-mysql mysqladmin ping -h localhost -uroot -prootpass --silent && break
+            sleep 2
+          done
+
+      - name: Insert test data
+        run: |
+          docker exec demo-mysql mysql -uroot -prootpass -e \
+            "CREATE TABLE IF NOT EXISTS taskdb.probe (id INT); INSERT INTO taskdb.probe VALUES (42);"
+
+      - name: Inspect and manage the custom network
+        run: |
+          docker network ls
+          docker network inspect demo-net
+          docker network connect bridge demo-mysql
+          docker network inspect demo-mysql --format '{{json .NetworkSettings.Networks}}'
+          docker network disconnect bridge demo-mysql
+
+      - name: Inspect volumes
+        run: |
+          docker volume ls
+          docker volume inspect demo-data
+
+      - name: Backup the volume
+        run: |
+          chmod +x scripts/backup-volume.sh scripts/restore-volume.sh
+          ./scripts/backup-volume.sh demo-data "$(pwd)/backups"
+          ls -la backups
+
+      - name: Destroy the container and volume (simulate data loss)
+        run: |
+          docker rm -f demo-mysql
+          docker volume rm demo-data
+
+      - name: Restore into a fresh volume
+        run: |
+          BACKUP_FILE=$(ls backups/demo-data-*.tar.gz | head -n1)
+          ./scripts/restore-volume.sh demo-data "$BACKUP_FILE"
+
+      - name: Verify restored data is intact
+        run: |
+          docker run -d --name demo-mysql-restored --network demo-net \
+            -v demo-data:/var/lib/mysql \
+            -e MYSQL_ROOT_PASSWORD=rootpass mysql:8.4
+          for i in $(seq 1 30); do
+            docker exec demo-mysql-restored mysqladmin ping -h localhost -uroot -prootpass --silent && break
+            sleep 2
+          done
+          RESULT=$(docker exec demo-mysql-restored mysql -uroot -prootpass -N -e "SELECT id FROM taskdb.probe;")
+          echo "Restored row: $RESULT"
+          [ "$RESULT" = "42" ]
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f demo-mysql demo-mysql-restored || true
+          docker volume rm demo-data || true
+          docker network rm demo-net || true
+
+  security-audit:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image to scan
+        run: docker build -t ${{ env.IMAGE_NAME }}:scan ./app
+
+      - name: Scan image for vulnerabilities with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:scan
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: 0
+
+      - name: Audit the Docker host with Docker Bench for Security
+        run: |
+          docker run --rm --net host --pid host --userns host --cap-add audit_control \
+            -v /var/lib:/var/lib:ro \
+            -v /var/run/docker.sock:/var/run/docker.sock:ro \
+            -v /etc:/etc:ro \
+            --label docker_bench_security \
+            docker/docker-bench-security | tee docker-bench-report.txt
+
+      - name: Upload Docker Bench report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-bench-security-report
+          path: docker-bench-report.txt
+
+  compose-stack:
+    needs: [dockerfile-optimization, network-and-volume-demo, security-audit]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create secrets from examples
+        run: |
+          cp secrets/mysql_root_password.txt.example secrets/mysql_root_password.txt
+          cp secrets/mysql_password.txt.example secrets/mysql_password.txt
+          cp secrets/grafana_admin_password.txt.example secrets/grafana_admin_password.txt
+
+      - name: Build images via Compose
+        run: docker compose build
+
+      - name: Bring up the full stack
+        run: docker compose up -d
+
+      - name: List Compose services
+        run: docker compose ps
+
+      - name: Wait for the app to be reachable through nginx
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8080/actuator/health | grep -q '"status":"UP"' && break
+            echo "waiting for app via nginx..."
+            sleep 2
+          done
+          curl -sf http://localhost:8080/actuator/health
+
+      - name: Inspect the custom network with all services attached
+        run: docker network inspect docker-assignment2-net
+
+      - name: Generate some traffic for the log pipeline to pick up
+        run: |
+          for i in $(seq 1 10); do curl -sf http://localhost:8080/api/tasks >/dev/null; done
+
+      - name: Wait for Loki to be ready
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:3100/ready && break
+            sleep 2
+          done
+
+      - name: Verify Loki actually ingested the app's logs
+        run: |
+          sleep 15
+          RESPONSE=$(curl -sf -G http://localhost:3100/loki/api/v1/query_range \
+            --data-urlencode 'query={compose_service="app"}' \
+            --data-urlencode 'limit=5')
+          echo "$RESPONSE" | jq .
+          COUNT=$(echo "$RESPONSE" | jq '.data.result | length')
+          echo "Loki streams found for app: $COUNT"
+          [ "$COUNT" -gt 0 ]
+
+      - name: Show Compose logs
+        if: always()
+        run: docker compose logs --tail=50
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  push-and-pull:
+    needs: compose-stack
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and tag optimized image
+        run: |
+          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest \
+                       -t ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+                       ./app
+
+      - name: Push to Docker Hub
+        run: |
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Remove local image to force a real pull
+        run: docker rmi ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Pull image back from Docker Hub
+        run: docker pull ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Run pulled image against a throwaway MySQL and verify health
+        run: |
+          docker network create pull-net
+          docker run -d --name pull-mysql --network pull-net \
+            -e MYSQL_ROOT_PASSWORD=rootpass -e MYSQL_DATABASE=taskdb \
+            -e MYSQL_USER=taskuser -e MYSQL_PASSWORD=taskpass mysql:8.4
+          for i in $(seq 1 30); do
+            docker exec pull-mysql mysqladmin ping -h localhost -uroot -prootpass --silent && break
+            sleep 2
+          done
+          docker run -d --name pull-app --network pull-net -p 8080:8080 \
+            -e DB_HOST=pull-mysql -e DB_NAME=taskdb -e DB_USER=taskuser -e DB_PASSWORD=taskpass \
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8080/actuator/health | grep -q '"status":"UP"' && break
+            sleep 2
+          done
+          curl -sf http://localhost:8080/actuator/health
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f pull-app pull-mysql || true
+          docker network rm pull-net || true

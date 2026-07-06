@@ -1,0 +1,175 @@
+services:
+  # reverse proxy - the only service with a published port to the app itself;
+  # nginx-unprivileged already drops root, so it needs no special capabilities
+  nginx:
+    image: nginxinc/nginx-unprivileged:1.27-alpine
+    container_name: docker-assignment2-nginx
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 128m
+    cpus: 0.5
+    depends_on:
+      - app
+    networks:
+      - appnet
+    restart: unless-stopped
+
+  app:
+    build:
+      context: ./app
+    image: ${DOCKERHUB_USERNAME:-biradarvijay}/docker-assignment2-app:latest
+    container_name: docker-assignment2-app
+    environment:
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_NAME: ${MYSQL_DATABASE:-taskdb}
+      DB_USER: ${MYSQL_USER:-taskuser}
+    secrets:
+      - mysql_password
+    tmpfs:
+      - /tmp
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 512m
+    cpus: 1.0
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - appnet
+    restart: unless-stopped
+
+  # bonus DB from assignment 1, hardened further here: secrets instead of plain
+  # env passwords, capabilities dropped to only what the mysqld entrypoint needs
+  mysql:
+    image: mysql:8.4
+    container_name: docker-assignment2-mysql
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-taskdb}
+      MYSQL_USER: ${MYSQL_USER:-taskuser}
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/mysql_root_password
+      MYSQL_PASSWORD_FILE: /run/secrets/mysql_password
+    secrets:
+      - mysql_root_password
+      - mysql_password
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p\"$$(cat /run/secrets/mysql_root_password)\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # the official entrypoint chowns the data dir and drops from root to
+    # mysql on first boot - these four are the minimum it needs to do that
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+    mem_limit: 512m
+    cpus: 1.0
+    networks:
+      - appnet
+    restart: unless-stopped
+
+  # collects container logs for the bonus log-aggregation stack; needs the
+  # docker socket + container log dir, so it's the one service that keeps
+  # default capabilities rather than dropping them (documented in README)
+  promtail:
+    image: grafana/promtail:2.9.8
+    container_name: docker-assignment2-promtail
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./docker/promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    cpus: 0.5
+    depends_on:
+      - loki
+    networks:
+      - appnet
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:2.9.8
+    container_name: docker-assignment2-loki
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - loki-data:/loki
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 256m
+    cpus: 0.5
+    networks:
+      - appnet
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: docker-assignment2-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+    secrets:
+      - grafana_admin_password
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 256m
+    cpus: 0.5
+    depends_on:
+      - loki
+    networks:
+      - appnet
+    restart: unless-stopped
+
+networks:
+  # named explicitly (rather than letting Compose auto-name it) so the
+  # "inspect/manage the network" commands in the README have a fixed target
+  appnet:
+    name: docker-assignment2-net
+    driver: bridge
+
+volumes:
+  mysql-data:
+  grafana-data:
+  loki-data:
+
+secrets:
+  mysql_root_password:
+    file: ./secrets/mysql_root_password.txt
+  mysql_password:
+    file: ./secrets/mysql_password.txt
+  grafana_admin_password:
+    file: ./secrets/grafana_admin_password.txt

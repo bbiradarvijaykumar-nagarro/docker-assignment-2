@@ -1,0 +1,12 @@
+# BASELINE - the "existing Dockerfile" this assignment asks us to optimize.
+# Everything about this is naive on purpose: single stage so the ~500MB JDK/Maven
+# toolchain ships in the final image, no dependency layer caching so every code
+# change re-downloads the internet, and it runs as root.
+FROM maven:3.9-eclipse-temurin-17
+
+WORKDIR /app
+COPY . .
+RUN mvn -DskipTests package
+
+EXPOSE 8080
+CMD ["java", "-jar", "target/docker-assignment-app.jar"]

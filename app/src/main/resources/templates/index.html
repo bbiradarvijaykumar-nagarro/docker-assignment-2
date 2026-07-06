@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <title>Task Manager - Docker Assignment</title>
+    <link rel="stylesheet" th:href="@{/css/style.css}">
+</head>
+<body>
+<div class="container">
+    <h1>Task Manager</h1>
+    <p class="subtitle">Spring Boot + MySQL, running in Docker</p>
+
+    <form th:action="@{/tasks}" th:object="${newTask}" method="post" class="task-form">
+        <input type="text" th:field="*{title}" placeholder="Task title" required>
+        <input type="text" th:field="*{description}" placeholder="Description">
+        <button type="submit">Add Task</button>
+    </form>
+
+    <table class="task-table">
+        <thead>
+        <tr>
+            <th>Title</th>
+            <th>Description</th>
+            <th>Status</th>
+            <th>Actions</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr th:each="task : ${tasks}" th:classappend="${task.completed} ? 'done' : ''">
+            <td th:text="${task.title}"></td>
+            <td th:text="${task.description}"></td>
+            <td th:text="${task.completed} ? 'Done' : 'Pending'"></td>
+            <td>
+                <form th:action="@{/tasks/{id}/complete(id=${task.id})}" method="post" class="inline-form">
+                    <button type="submit">Toggle</button>
+                </form>
+                <form th:action="@{/tasks/{id}/delete(id=${task.id})}" method="post" class="inline-form">
+                    <button type="submit" class="danger">Delete</button>
+                </form>
+            </td>
+        </tr>
+        </tbody>
+    </table>
+</div>
+</body>
+</html>

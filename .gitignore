@@ -1,0 +1,10 @@
+app/target/
+.idea/
+.vscode/
+*.iml
+.env
+*.log
+backups/
+ci-tmp/
+secrets/*.txt
+!secrets/*.txt.example
