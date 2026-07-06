@@ -69,7 +69,10 @@ services:
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p\"$$(cat /run/secrets/mysql_root_password)\" --silent"]
+      # a real authenticated query rather than "mysqladmin ping", which can
+      # report healthy during mysqld's internal init-then-restart sequence
+      # before it's actually ready to serve connections
+      test: ["CMD-SHELL", "mysql -u root -p\"$$(cat /run/secrets/mysql_root_password)\" -e 'SELECT 1' >/dev/null 2>&1"]
       interval: 10s
       timeout: 5s
       retries: 5

@@ -96,8 +96,11 @@ jobs:
             -v "$(pwd)/ci-tmp/custom.cnf:/etc/mysql/conf.d/custom.cnf:ro" \
             -e MYSQL_ROOT_PASSWORD=rootpass -e MYSQL_DATABASE=taskdb \
             mysql:8.4
+          # mysqladmin ping can return a false positive during mysqld's internal
+          # init-then-restart startup sequence, so wait on a real authenticated
+          # query instead of just a ping
           for i in $(seq 1 30); do
-            docker exec demo-mysql mysqladmin ping -h localhost -uroot -prootpass --silent && break
+            docker exec demo-mysql mysql -uroot -prootpass -e "SELECT 1" >/dev/null 2>&1 && break
             sleep 2
           done
 
@@ -141,7 +144,7 @@ jobs:
             -v demo-data:/var/lib/mysql \
             -e MYSQL_ROOT_PASSWORD=rootpass mysql:8.4
           for i in $(seq 1 30); do
-            docker exec demo-mysql-restored mysqladmin ping -h localhost -uroot -prootpass --silent && break
+            docker exec demo-mysql-restored mysql -uroot -prootpass -e "SELECT 1" >/dev/null 2>&1 && break
             sleep 2
           done
           RESULT=$(docker exec demo-mysql-restored mysql -uroot -prootpass -N -e "SELECT id FROM taskdb.probe;")
@@ -165,7 +168,7 @@ jobs:
         run: docker build -t ${{ env.IMAGE_NAME }}:scan ./app
 
       - name: Scan image for vulnerabilities with Trivy
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.IMAGE_NAME }}:scan
           format: table
@@ -288,7 +291,7 @@ jobs:
             -e MYSQL_ROOT_PASSWORD=rootpass -e MYSQL_DATABASE=taskdb \
             -e MYSQL_USER=taskuser -e MYSQL_PASSWORD=taskpass mysql:8.4
           for i in $(seq 1 30); do
-            docker exec pull-mysql mysqladmin ping -h localhost -uroot -prootpass --silent && break
+            docker exec pull-mysql mysql -uroot -prootpass -e "SELECT 1" >/dev/null 2>&1 && break
             sleep 2
           done
           docker run -d --name pull-app --network pull-net -p 8080:8080 \
