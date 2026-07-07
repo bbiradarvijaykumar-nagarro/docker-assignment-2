@@ -256,6 +256,7 @@ jobs:
             curl -sf http://localhost:3100/ready && break
             sleep 2
           done
+          curl -sf http://localhost:3100/ready
 
       - name: Verify Loki actually ingested the app's logs
         run: |
